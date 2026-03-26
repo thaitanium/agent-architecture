@@ -1,0 +1,31 @@
+{
+  "agents": {
+    "product_manager":      { "model": "claude-opus-4-6", "max_tokens": 4096,  "effort": "high",   "thinking_enabled": true },
+    "technical_architect":  { "model": "claude-opus-4-6", "max_tokens": 6000,  "effort": "high",   "thinking_enabled": true },
+    "ai_specialist":        { "model": "claude-opus-4-6", "max_tokens": 4000,  "effort": "high",   "thinking_enabled": true },
+    "frontend_builder":     { "model": "claude-opus-4-6", "max_tokens": 12000, "effort": "high",   "thinking_enabled": true },
+    "backend_builder":      { "model": "claude-opus-4-6", "max_tokens": 8000,  "effort": "high",   "thinking_enabled": true },
+    "database_agent":       { "model": "claude-opus-4-6", "max_tokens": 5000,  "effort": "medium", "thinking_enabled": true },
+    "qa_testing":           { "model": "claude-opus-4-6", "max_tokens": 5000,  "effort": "medium", "thinking_enabled": true },
+    "code_quality":         { "model": "claude-opus-4-6", "max_tokens": 4000,  "effort": "medium", "thinking_enabled": false }
+  },
+  "workflow": [
+    { "order": 1, "agent": "product_manager",     "depends_on": [] },
+    { "order": 2, "agent": "technical_architect", "depends_on": ["product_manager"] },
+    { "order": 3, "agent": "ai_specialist",       "depends_on": ["product_manager","technical_architect"] },
+    { "order": 4, "agent": "database_agent",      "depends_on": ["technical_architect"] },
+    { "order": 5, "agent": "backend_builder",     "depends_on": ["technical_architect","database_agent"] },
+    { "order": 6, "agent": "frontend_builder",    "depends_on": ["technical_architect"] },
+    { "order": 7, "agent": "qa_testing",          "depends_on": ["backend_builder","frontend_builder"] },
+    { "order": 8, "agent": "code_quality",        "depends_on": ["backend_builder","frontend_builder"] }
+  ],
+  "handoff_files": {
+    "product_spec":          "handoffs/product_spec.md",
+    "architecture":          "handoffs/technical_architecture.md",
+    "api_specification":     "handoffs/api_specification.md",
+    "database_schema":       "handoffs/database_schema.md",
+    "sprint_contract":       "handoffs/sprint_contract.md",
+    "implementation_status": "handoffs/implementation_status.md",
+    "qa_findings":           "handoffs/qa_findings.md"
+  }
+}
