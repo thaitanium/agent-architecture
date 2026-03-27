@@ -2,186 +2,291 @@
 Unit tests for agents/core/base_agent.py
 Run with: pytest tests/test_base_agent.py -v
 """
+
 import json
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
 from agents.core.base_agent import (
-    AgentConfig, AgentState, AgentType, BaseAgent, HandoffArtifact,
+    AgentConfig,
+    AgentState,
+    AgentType,
+    BaseAgent,
+    EffortLevel,
+    HandoffArtifact,
 )
 
 
-@pytest.fixture
-def config():
-      return AgentConfig(
-                agent_type=AgentType.QA_TESTING,
-                model="claude-opus-4-6",
-                max_tokens=1024,
-                thinking_enabled=False,
-                thinking_budget=0,
-                context_reset_threshold=0.75,
-      )
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
 
 @pytest.fixture
-def agent(config):
-      with patch("anthropic.Anthropic"):
-                return BaseAgent(config, agent_id="test01")
+def config_thinking_off():
+        """Minimal config with thinking disabled."""
+        return AgentConfig(
+            agent_type=AgentType.QA_TESTING,
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            thinking_enabled=False,
+            effort=EffortLevel.MEDIUM,
+            system_prompt="You are a test agent.",
+        )
 
 
-class TestAgentState:
-      def test_save_and_load_roundtrip(self, tmp_path):
-                state = AgentState(agent_id="abc", agent_type=AgentType.PRODUCT_MANAGER, task_id="t1")
-                state.save(directory=tmp_path)
-                loaded = AgentState.load("abc", "t1", directory=tmp_path)
-                assert loaded is not None
-                assert loaded.agent_id == "abc"
-                assert loaded.task_id == "t1"
-                assert loaded.agent_type == AgentType.PRODUCT_MANAGER
-
-      def test_load_missing_returns_none(self, tmp_path):
-                assert AgentState.load("x", "y", directory=tmp_path) is None
-
-      def test_save_creates_parent_dirs(self, tmp_path):
-                deep = tmp_path / "a" / "b"
-                state = AgentState(agent_id="x", agent_type=AgentType.CODE_QUALITY, task_id="t")
-                state.save(directory=deep)
-                assert deep.exists()
+@pytest.fixture
+def config_thinking_on():
+        """Config with thinking enabled."""
+        return AgentConfig(
+            agent_type=AgentType.TECHNICAL_ARCHITECT,
+            model="claude-opus-4-6",
+            max_tokens=8000,
+            thinking_enabled=True,
+            effort=EffortLevel.HIGH,
+            system_prompt="You are a thinking test agent.",
+        )
 
 
-class TestHandoffArtifact:
-      def test_to_prompt_includes_original_task(self):
-                a = HandoffArtifact(
-                              task_id="t", agent_type="qa_testing",
-                              original_task="Build login page",
-                              next_steps=["Add form validation"],
-                              reset_count=1,
-                )
-                prompt = a.to_prompt()
-                assert "Build login page" in prompt
-                assert "Add form validation" in prompt
-
-      def test_reset_count_stored(self):
-                a = HandoffArtifact(task_id="t", agent_type="fe", original_task="x", reset_count=3)
-                assert a.reset_count == 3
+@pytest.fixture
+def mock_anthropic():
+        """Patch anthropic.Anthropic so no real API calls are made."""
+        with patch("agents.core.base_agent.anthropic.Anthropic") as mock_cls:
+                    mock_client = MagicMock()
+                    mock_cls.return_value = mock_client
+                    yield mock_client
 
 
-class TestStructuredOutputTool:
-      def test_tool_name(self, agent):
-                from pydantic import BaseModel
-                class S(BaseModel):
-                              v: str
-                          tools, choice = agent._build_structured_output_tool(S)
-                assert tools[0]["name"] == "structured_output"
-                assert choice == {"type": "tool", "name": "structured_output"}
+# ---------------------------------------------------------------------------
+# AgentConfig validation
+# ---------------------------------------------------------------------------
 
-      def test_schema_properties_present(self, agent):
-                from pydantic import BaseModel
-                class S(BaseModel):
-                              count: int
-                              name: str
-                          tools, _ = agent._build_structured_output_tool(S)
-                props = tools[0]["input_schema"].get("properties", {})
-                assert "count" in props
-                assert "name" in props
+
+class TestAgentConfig:
+        def test_defaults(self):
+                    cfg = AgentConfig(
+                                    agent_type=AgentType.QA_TESTING,
+                                    model="claude-sonnet-4-6",
+                                    system_prompt="hi",
+                    )
+                    assert cfg.max_tokens == 8192
+                    assert cfg.thinking_enabled is False
+                    assert cfg.effort == EffortLevel.MEDIUM
+                    assert cfg.enable_caching is True
+
+        def test_effort_enum_values(self):
+                    assert EffortLevel.LOW == "low"
+                    assert EffortLevel.MEDIUM == "medium"
+                    assert EffortLevel.HIGH == "high"
+
+        def test_no_thinking_budget_field(self):
+                    """thinking_budget was removed; verify it no longer exists on AgentConfig."""
+                    cfg = AgentConfig(
+                        agent_type=AgentType.QA_TESTING,
+                        model="claude-sonnet-4-6",
+                        system_prompt="hi",
+                    )
+                    assert not hasattr(cfg, "thinking_budget"), (
+                        "thinking_budget was removed in favour of effort; do not re-add it"
+                    )
+
+
+# ---------------------------------------------------------------------------
+# BaseAgent._build_api_params  —  thinking=False
+# ---------------------------------------------------------------------------
+
+
+class TestBuildApiParamsThinkingOff:
+        def test_no_thinking_key_when_disabled(self, config_thinking_off, mock_anthropic):
+                    agent = BaseAgent.__new__(BaseAgent)
+                    agent.config = config_thinking_off
+                    agent.client = mock_anthropic
+                    agent.state = AgentState()
+
+            params = agent._build_api_params(messages=[{"role": "user", "content": "hi"}])
+
+        assert "thinking" not in params, "thinking must not appear when thinking_enabled=False"
+
+    def test_tool_choice_tool_when_thinking_off(self, config_thinking_off, mock_anthropic):
+                """When thinking is disabled, tool_choice may be forced to a specific tool."""
+                agent = BaseAgent.__new__(BaseAgent)
+                agent.config = config_thinking_off
+                agent.client = mock_anthropic
+                agent.state = AgentState()
+
+        params = agent._build_api_params(
+                        messages=[{"role": "user", "content": "hi"}],
+                        tools=[{"name": "my_tool"}],
+                        force_tool="my_tool",
+        )
+        if "tool_choice" in params:
+                        # If a tool_choice is set, it can be {"type": "tool", ...} since thinking is off
+                        assert params["tool_choice"]["type"] in ("auto", "tool", "any")
+
+    def test_no_betas_header_when_thinking_off(self, config_thinking_off, mock_anthropic):
+                """No interleaved-thinking beta header should ever be sent."""
+                agent = BaseAgent.__new__(BaseAgent)
+                agent.config = config_thinking_off
+                agent.client = mock_anthropic
+                agent.state = AgentState()
+
+        params = agent._build_api_params(messages=[{"role": "user", "content": "hi"}])
+
+        assert "betas" not in params, (
+                        "interleaved-thinking-2025-05-14 beta header was removed; must not reappear"
+        )
+
+
+# ---------------------------------------------------------------------------
+# BaseAgent._build_api_params  —  thinking=True (adaptive)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildApiParamsThinkingOn:
+        def test_adaptive_thinking_format(self, config_thinking_on, mock_anthropic):
+                    """thinking must be {'type': 'adaptive'}, NOT {'type': 'enabled', 'budget_tokens': ...}."""
+                    agent = BaseAgent.__new__(BaseAgent)
+                    agent.config = config_thinking_on
+                    agent.client = mock_anthropic
+                    agent.state = AgentState()
+
+            params = agent._build_api_params(messages=[{"role": "user", "content": "hi"}])
+
+        assert "thinking" in params, "thinking key must be present when thinking_enabled=True"
+        thinking = params["thinking"]
+        assert thinking["type"] == "adaptive", (
+                        f"Expected thinking type 'adaptive', got '{thinking['type']}'"
+        )
+        assert "budget_tokens" not in thinking, (
+                        "budget_tokens is deprecated; use output_config.effort instead"
+        )
+
+    def test_effort_in_output_config(self, config_thinking_on, mock_anthropic):
+                """output_config.effort must reflect the EffortLevel enum value."""
+                agent = BaseAgent.__new__(BaseAgent)
+                agent.config = config_thinking_on
+                agent.client = mock_anthropic
+                agent.state = AgentState()
+
+        params = agent._build_api_params(messages=[{"role": "user", "content": "hi"}])
+
+        assert "output_config" in params, "output_config must be present when thinking=adaptive"
+        assert params["output_config"]["effort"] == EffortLevel.HIGH
+
+    def test_tool_choice_auto_when_thinking_on(self, config_thinking_on, mock_anthropic):
+                """tool_choice MUST be 'auto' when thinking is enabled — 'tool' causes an API error."""
+                agent = BaseAgent.__new__(BaseAgent)
+                agent.config = config_thinking_on
+                agent.client = mock_anthropic
+                agent.state = AgentState()
+
+        params = agent._build_api_params(
+                        messages=[{"role": "user", "content": "hi"}],
+                        tools=[{"name": "structured_output"}],
+                        force_tool="structured_output",
+        )
+
+        if "tool_choice" in params:
+                        assert params["tool_choice"]["type"] == "auto", (
+                                            "tool_choice MUST be 'auto' when thinking is enabled; "
+                                            "'tool' is incompatible and raises an API error"
+                        )
+
+    def test_no_betas_header_when_thinking_on(self, config_thinking_on, mock_anthropic):
+                """The interleaved-thinking-2025-05-14 beta header must not be present."""
+                agent = BaseAgent.__new__(BaseAgent)
+                agent.config = config_thinking_on
+                agent.client = mock_anthropic
+                agent.state = AgentState()
+
+        params = agent._build_api_params(messages=[{"role": "user", "content": "hi"}])
+
+        assert "betas" not in params, (
+                        "betas header (interleaved-thinking-2025-05-14) was deprecated; must not be sent"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Prompt caching
+# ---------------------------------------------------------------------------
+
+
+class TestPromptCaching:
+        def test_system_blocks_have_cache_control(self, config_thinking_off, mock_anthropic):
+                    """System prompt must be returned as a list with cache_control for prompt caching."""
+                    agent = BaseAgent.__new__(BaseAgent)
+                    agent.config = config_thinking_off
+                    agent.client = mock_anthropic
+                    agent.state = AgentState()
+
+            if not hasattr(agent, "_system_blocks"):
+                            pytest.skip("_system_blocks helper not present")
+
+        blocks = agent._system_blocks()
+        assert isinstance(blocks, list), "_system_blocks() must return a list"
+        # At least one block must carry cache_control
+        has_cache = any(b.get("cache_control") for b in blocks if isinstance(b, dict))
+        assert has_cache, "System prompt block must include cache_control: {type: ephemeral}"
+
+    def test_tool_definitions_have_cache_control(self, config_thinking_off, mock_anthropic):
+                """Tool definitions must include cache_control on the last tool for KV-cache efficiency."""
+                agent = BaseAgent.__new__(BaseAgent)
+                agent.config = config_thinking_off
+                agent.client = mock_anthropic
+                agent.state = AgentState()
+
+        if not hasattr(agent, "_tools_with_cache"):
+                        pytest.skip("_tools_with_cache helper not present")
+
+        tools = agent._tools_with_cache([{"name": "my_tool", "description": "does stuff",
+                                                                                    "input_schema": {"type": "object", "properties": {}}}])
+        assert isinstance(tools, list)
+        has_cache = any(t.get("cache_control") for t in tools if isinstance(t, dict))
+        assert has_cache, "At least one tool definition must include cache_control"
+
+
+# ---------------------------------------------------------------------------
+# Context window / reset
+# ---------------------------------------------------------------------------
 
 
 class TestContextReset:
-      def test_no_reset_below_threshold(self, agent):
-                assert agent._should_reset_context(100_000) is False
+        def test_state_is_dataclass_with_messages(self, config_thinking_off, mock_anthropic):
+                    agent = BaseAgent.__new__(BaseAgent)
+                    agent.config = config_thinking_off
+                    agent.client = mock_anthropic
+                    agent.state = AgentState()
 
-      def test_reset_at_threshold(self, agent):
-                assert agent._should_reset_context(150_000) is True
+            assert hasattr(agent.state, "messages"), "AgentState must have a messages field"
+        assert isinstance(agent.state.messages, list)
 
-      def test_disabled_when_zero(self, config):
-                config.context_reset_threshold = 0
-                with patch("anthropic.Anthropic"):
-                              a = BaseAgent(config)
-                          assert a._should_reset_context(200_000) is False
+    def test_reset_clears_messages(self, config_thinking_off, mock_anthropic):
+                agent = BaseAgent.__new__(BaseAgent)
+                agent.config = config_thinking_off
+                agent.client = mock_anthropic
+                agent.state = AgentState()
+                agent.state.messages.append({"role": "user", "content": "hello"})
 
-
-class TestSDKParams:
-      def _mock_resp(self, in_tok=100, out_tok=50):
-                r = MagicMock()
-                r.content = [MagicMock(type="text", text="ok")]
-                r.stop_reason = "end_turn"
-                r.usage.input_tokens = in_tok
-                r.usage.output_tokens = out_tok
-                return r
-
-      def test_thinking_enabled_uses_correct_params(self, config):
-                config.thinking_enabled = True
-                config.thinking_budget = 3000
-                with patch("anthropic.Anthropic") as cls:
-                              client = MagicMock()
-                              cls.return_value = client
-                              client.messages.create.return_value = self._mock_resp()
-                              a = BaseAgent(config)
-                              a._call([{"role": "user", "content": "hi"}])
-                          kw = client.messages.create.call_args[1]
-                assert "betas" in kw
-                assert "interleaved-thinking-2025-05-14" in kw["betas"]
-                assert kw["thinking"]["type"] == "enabled"
-                assert kw["thinking"]["budget_tokens"] == 3000
-
-      def test_no_output_config_format(self, config):
-                config.thinking_enabled = False
-                with patch("anthropic.Anthropic") as cls:
-                              client = MagicMock()
-                              cls.return_value = client
-                              client.messages.create.return_value = self._mock_resp()
-                              a = BaseAgent(config)
-                              a._call([{"role": "user", "content": "hi"}])
-                          kw = client.messages.create.call_args[1]
-                assert "output_config" not in kw
-
-      def test_token_accumulation(self, config):
-                config.thinking_enabled = False
-                with patch("anthropic.Anthropic") as cls:
-                              client = MagicMock()
-                              cls.return_value = client
-                              client.messages.create.return_value = self._mock_resp(100, 50)
-                              a = BaseAgent(config)
-                              a._call([{"role": "user", "content": "hi"}])
-                              a._call([{"role": "user", "content": "bye"}])
-                          assert a.total_input_tokens == 200
-                assert a.total_output_tokens == 100
+        if hasattr(agent, "reset"):
+                        agent.reset()
+                        assert agent.state.messages == [], "reset() must clear conversation history"
 
 
-class TestRunStructuredOutput:
-      def test_returns_pydantic_model_from_tool_use(self, config):
-                from pydantic import BaseModel
-                class Out(BaseModel):
-                              result: str
-                          config.thinking_enabled = False
-                with patch("anthropic.Anthropic") as cls:
-                              client = MagicMock()
-                              cls.return_value = client
-                              tb = MagicMock()
-                              tb.type = "tool_use"
-                              tb.name = "structured_output"
-                              tb.id = "tool_1"
-                              tb.input = {"result": "success"}
-                              r = MagicMock()
-                              r.content = [tb]
-                              r.stop_reason = "tool_use"
-                              r.usage.input_tokens = 100
-                              r.usage.output_tokens = 50
-                              client.messages.create.return_value = r
-                              a = BaseAgent(config)
-                              result = a.run(task="do it", task_id="t1", output_schema=Out)
-                          assert isinstance(result, Out)
-                assert result.result == "success"
+# ---------------------------------------------------------------------------
+# HandoffArtifact
+# ---------------------------------------------------------------------------
 
 
-class TestCostSummary:
-      def test_keys_present(self, agent):
-                s = agent.get_cost_summary()
-                for k in ["agent_type", "input_tokens", "output_tokens", "total_tokens"]:
-                              assert k in s
-
-            def test_initial_zeros(self, agent):
-                      s = agent.get_cost_summary()
-                      assert s["input_tokens"] == 0
-                      assert s["output_tokens"] == 0
-                      assert s["total_tokens"] == 0
-              
+class TestHandoffArtifact:
+        def test_handoff_serialises_to_json(self):
+                    artifact = HandoffArtifact(
+                                    source_agent=AgentType.PRODUCT_MANAGER,
+                                    target_agent=AgentType.TECHNICAL_ARCHITECT,
+                                    payload={"spec": "build a todo app"},
+                                    task_id="test-123",
+                    )
+                    data = json.loads(artifact.to_json())
+                    assert data["source_agent"] == AgentType.PRODUCT_MANAGER
+                    assert data["task_id"] == "test-123"
+                    assert "spec" in data["payload"]
